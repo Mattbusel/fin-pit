@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests ${{ matrix.os }} py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-15]
+        python: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      - name: Vectors match the reference code
+        run: python tools/gen_vectors.py --check
+      - name: Tests
+        run: python -m pytest -q
+
+  reference-libraries:
+    name: conformance vs TA-Lib, pandas-ta-classic, stockstats
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" "TA-Lib==0.8.3" "pandas-ta-classic==0.9.0" "stockstats==0.6.14" exchange_calendars
+      - name: Library conformance (strict xfail on the measured differences)
+        run: python -m pytest -q tests/test_conformance_libraries.py tests/test_adapters.py -ra
+      - name: Results table is current
+        run: |
+          python tools/conformance_report.py
+          python - <<'EOF'
+          import pathlib, re, subprocess
+          new = pathlib.Path("docs/conformance-results.md").read_text()
+          old = subprocess.run(["git", "show", "HEAD:docs/conformance-results.md"], capture_output=True, text=True).stdout
+          strip = lambda s: re.sub(r"on \d{4}-\d{2}-\d{2}", "", s)
+          assert strip(new) == strip(old), "docs/conformance-results.md is out of date: run tools/conformance_report.py"
+          EOF
+
+  notebooks:
+    name: issue notebooks run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" nbclient nbformat ipykernel
+      - name: Execute examples/*.ipynb
+        run: python tools/make_notebooks.py --test
+
+  package:
+    name: build and install the wheel
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Install the wheel in a clean venv and use it
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install dist/*.whl pandas
+          cd /tmp
+          /tmp/v/bin/python -I -c "
+          import fin_pit as pit, pandas as pd
+          from fin_pit import conformance
+          assert len(conformance.all_cases()) == 568 and len(conformance.cases()) == 344
+          df = pd.DataFrame({'close': range(1, 46)}, dtype=float)
+          out = df.pit.indicator('sma', 200)
+          assert out['SMA_200'].isna().all() and out['bars_available'].iloc[-1] == 45
+          print('ok', pit.__version__)
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

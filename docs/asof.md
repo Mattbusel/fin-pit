@@ -32,8 +32,16 @@ async def run_agent(): ...
 | `column` | `"available_at"` | the column or index level that holds availability times |
 
 The decision time lives in a `contextvars.ContextVar`: it follows `await`, does not leak into
-other threads or tasks, and `contextvars.copy_context().run(...)` carries it into a worker.
-Nested blocks may only move the clock back; a nested `asof` later than its parent raises.
+other threads or tasks, and `contextvars.copy_context().run(...)` or `pit.bind(fn)` carries it
+into a worker (`executor.submit(pit.bind(fetch), "NVDA")`). Nested blocks may only move the clock
+back; a nested `asof` later than its parent raises.
+
+As a decorator, `asof` works on plain, async, generator and async generator functions; a
+generator body sees the decision time on every step, not only until its first `yield`.
+
+`asof` also remembers the zone the decision was given in (`tz=`, or the offset of an aware
+time). Guarded calls read naive date arguments, and `scan_text` reads naive timestamps, in that
+zone.
 
 `pit.decision_time()` returns the active time (or `None`); `pit.current()` returns the whole state.
 
@@ -56,9 +64,12 @@ Supported objects:
 - Polars DataFrame (`check` and `filter`) and LazyFrame (`filter` only, so nothing is collected);
 - lists and tuples of `PITRecord`, dicts with an `available_at` key, or objects with an
   `available_at` attribute;
-- a single record (a late one raises even under `filter`, since it cannot be dropped).
+- a single record (a late one raises even under `filter`, since it cannot be dropped);
+- dicts, lists and tuples that nest any of the above (`{"rows": [...], "meta": ...}`,
+  `(content, artifact)`): each nested container is checked or filtered in place.
 
-A missing `available_at` (`None`, `NaN`, `NaT`) means "unknown" and is treated as not available.
+A missing `available_at` (`None`, `NaN`, `NaT`, `pd.NA`, or the strings `""`/`"NaT"`) means
+"unknown" and is treated as not available. `latest` never picks such a row over a real vintage.
 
 `LookaheadError` carries `decision_time`, `available_at` (the earliest late time) and `count`.
 
@@ -88,16 +99,29 @@ the fix for fundamentals joined on fiscal period ends (FinRL #1463).
 def get_news(ticker, curr_date): ...
 ```
 
-`pit.guard(fn, **options)` wraps any callable (sync or async). Inside `asof`:
+`pit.guard(fn, **options)` wraps any callable (sync, async, generator or async generator).
+Inside `asof`:
 
 1. arguments named in `date_args` (`as_of`, `curr_date`, `current_date`, `trade_date`, `end`,
-   `end_date`, `end_time`, `date`, `to`, `to_date`, `until`, ...) that parse as a time later than
-   the decision time raise before the call; naive values are read in `date_tz` (UTC by default);
-2. the result goes through `filter` or `check` (`mode`);
-3. with `scan_text=True`, a string result that mentions a later date raises (a bare `YYYY-MM-DD`
-   counts only when the whole day is after the decision's UTC day).
+   `end_date`, `end_time`, `date`, `to`, `to_date`, `until`, ...) that read as a time later than
+   the decision time raise before the call. Understood: ISO dates and times, `YYYYMMDD` ints and
+   strings (tushare, akshare), `YYYY/MM/DD`, epoch seconds, milliseconds (ccxt `until`),
+   microseconds and nanoseconds, `date`/`datetime`/`Timestamp`/`datetime64`, and "now", "today",
+   "latest" (the wall clock). Naive values are read in `date_tz`, by default the zone the `asof`
+   was given in, so `end_date="2024-05-10 18:00"` is refused by a 16:00 New York decision. A bare
+   date means "up to and including that day" and passes on the decision day itself; the rows that
+   come back are still checked. A value that cannot be read warns `UnparsedDateWarning`
+   (`unparsed="raise"` refuses it, `"ignore"` skips it);
+2. the result goes through `filter` or `check` (`mode`), including nested containers; a generator
+   result is checked item by item as it is iterated (in `filter` mode a late record is skipped);
+3. with `scan_text=True`, a string result that mentions a later date raises. Matched:
+   `YYYY-MM-DD`, `YYYY/MM/DD`, `YYYY.MM.DD` (with an optional time and offset), `May 11, 2024`
+   and `11 May 2024`. A bare date counts only when the whole day is after the decision's day in
+   the `asof` zone; a time without an offset is read in that zone. Numeric dates such as
+   `05/11/2024` are ambiguous (month or day first) and are not matched.
 
-Outside `asof` the call passes through untouched, unless `require_asof=True`.
+Outside `asof` nothing can be checked. `require_asof=True` raises, `require_asof=False` passes
+silently, and the default passes with a one-time `UnguardedCallWarning` per wrapped function.
 
 ## Polars
 

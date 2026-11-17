@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
 
 UTC = _dt.timezone.utc
 
-__all__ = ["UTC", "to_utc", "zone"]
+__all__ = ["UTC", "source_zone", "to_utc", "zone"]
 
 
 def zone(tz: Any) -> _dt.tzinfo:
@@ -65,7 +65,10 @@ def to_utc(value: Any, tz: Optional[Any] = None, *, what: str = "time") -> _dt.d
     if isinstance(value, (int, float)):
         if value != value:  # NaN
             raise ValueError(f"{what} is NaN")
-        return _dt.datetime.fromtimestamp(float(value), tz=UTC)
+        try:
+            return _dt.datetime.fromtimestamp(float(value), tz=UTC)
+        except (OverflowError, OSError) as exc:  # out of range (OSError on Windows)
+            raise ValueError(f"{what} {value!r} is out of range as POSIX seconds") from exc
     if isinstance(value, str):
         text = value.strip()
         if not text:
@@ -99,3 +102,25 @@ def to_utc(value: Any, tz: Optional[Any] = None, *, what: str = "time") -> _dt.d
             )
         return _dt.datetime(value.year, value.month, value.day, tzinfo=zone(tz)).astimezone(UTC)
     raise TypeError(f"{what} must be a datetime, date, str or number, got {type(value).__name__}")
+
+
+def source_zone(value: Any, tz: Optional[Any] = None) -> _dt.tzinfo:
+    """The zone a time was given in: ``tz`` when passed, else the offset of an aware
+    datetime or ISO string, else UTC. Used to read later naive values the same way."""
+    if tz is not None:
+        return zone(tz)
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is not None and value.tzinfo.utcoffset(value) is not None:
+            return value.tzinfo
+        return UTC
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            return UTC
+        try:
+            parsed = _dt.datetime.fromisoformat(text)
+        except ValueError:
+            return UTC
+        if parsed.tzinfo is not None:
+            return parsed.tzinfo
+    return UTC

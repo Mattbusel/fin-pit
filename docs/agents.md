@@ -25,12 +25,26 @@ What the guarded tool does inside `asof`:
 |---|---|
 | date arguments | `curr_date`, `end_date`, `trade_date`, ... later than the decision time raise `LookaheadError` before the vendor is called |
 | stamped output | a DataFrame with `available_at`, or a list of records/dicts, is filtered (`mode="filter"`) or checked (`mode="raise"`) |
+| nested output | records inside dicts and lists (`{"rows": [...]}`), generators (item by item) and a `ToolMessage` artifact (`response_format="content_and_artifact"`) are checked the same way |
 | text output | with `scan_text=True`, a later date in the returned string raises |
 | unstamped output | passes through, or raises with `unstamped="raise"` |
+| unreadable date argument | warns `UnparsedDateWarning` (`unparsed="raise"` refuses it) |
 
 The wrapper is a LangChain `StructuredTool` with the original `name`, `description`,
-`args_schema`, `return_direct`, `handle_tool_error` and `tags`, so the model sees the same tool.
-It calls the original tool's `invoke`/`ainvoke`, so the original validation and callbacks run.
+`args_schema`, `response_format`, `return_direct`, `handle_tool_error` and `tags`, so the model
+sees the same schema. It calls the original tool's `invoke`/`ainvoke` with the run's config, so
+the original validation, callbacks and `RunnableConfig` arguments work. When the original needs a
+full `ToolCall` (an `InjectedToolCallId` argument, as in LangGraph handoffs, or
+`response_format="content_and_artifact"`), the wrapper rebuilds one with the same id. A LangGraph
+`Command` returned by a tool passes through unchecked: it carries state updates, not data rows.
+
+## Threads
+
+The decision time is a context variable. LangGraph's `ToolNode` carries it into its own workers
+(checked for both the sync and async paths), but a plain `ThreadPoolExecutor.submit` does not.
+A guarded call that finds no decision time passes through with a one-time
+`UnguardedCallWarning`; submit `pit.bind(fn)` instead so the check runs, or pass
+`require_asof=True` to make the missing decision time an error.
 
 ## Errors the model can read
 

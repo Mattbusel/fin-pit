@@ -21,8 +21,11 @@ from ._time import to_utc
 from .guard import (
     AVAILABLE_AT,
     LookaheadError,
+    UnguardedCallWarning,
+    UnparsedDateWarning,
     UnstampedError,
     asof,
+    bind,
     check,
     current,
     decision_time,
@@ -34,19 +37,22 @@ from .guard import (
 from .join import asof_join
 from .langchain import guard_tool, guard_tools
 from .records import CONFIDENCE_LEVELS, PITRecord
-from .warmup import coverage, indicator, required_bars
+from .warmup import coverage, indicator, noncausal_columns, required_bars
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "AVAILABLE_AT",
     "CONFIDENCE_LEVELS",
     "LookaheadError",
     "PITRecord",
+    "UnguardedCallWarning",
+    "UnparsedDateWarning",
     "UnstampedError",
     "__version__",
     "asof",
     "asof_join",
+    "bind",
     "check",
     "coverage",
     "current",
@@ -57,6 +63,7 @@ __all__ = [
     "guard_tools",
     "indicator",
     "latest",
+    "noncausal_columns",
     "required_bars",
     "scan_text",
     "to_utc",

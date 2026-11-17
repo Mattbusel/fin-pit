@@ -82,8 +82,21 @@ def _columns(block: Mapping[str, Any], names: Iterable[str]) -> List[List[Any]]:
     return [c if c else [None] * length for c in cols]
 
 
+def _usable_acceptance(raw: Any) -> bool:
+    """An acceptance time worth trusting as ``exact``: a non-empty string or an aware
+    datetime. Numbers (which would read as 1970 epoch seconds), empty strings and naive
+    datetimes are not."""
+    if isinstance(raw, str):
+        return bool(raw.strip())
+    if isinstance(raw, _dt.datetime):
+        return raw.tzinfo is not None and raw.tzinfo.utcoffset(raw) is not None
+    return False
+
+
 def _parse_acceptance(raw: Any) -> _dt.datetime:
-    if not isinstance(raw, str) or not raw:
+    if isinstance(raw, _dt.datetime) and _usable_acceptance(raw):
+        return to_utc(raw, what="acceptanceDateTime")
+    if not isinstance(raw, str) or not raw.strip():
         raise ValueError(f"bad acceptanceDateTime {raw!r}")
     text = raw.strip()
     if text[-1:] not in ("Z", "z") and "+" not in text[10:] and "-" not in text[10:]:
@@ -93,12 +106,13 @@ def _parse_acceptance(raw: Any) -> _dt.datetime:
 
 
 def acceptance_times(submissions: Any) -> Dict[str, _dt.datetime]:
-    """Accession number -> acceptance time (aware UTC) from submissions JSON."""
+    """Accession number -> acceptance time (aware UTC) from submissions JSON. Entries with
+    no usable acceptance time (missing, empty, numeric) are left out."""
     out: Dict[str, _dt.datetime] = {}
     for block in _recent_blocks(submissions):
         accn, acc = _columns(block, ("accessionNumber", "acceptanceDateTime"))
         for a, t in zip(accn, acc):
-            if not isinstance(a, str) or t is None:
+            if not isinstance(a, str) or not _usable_acceptance(t):
                 continue
             out[a] = _parse_acceptance(t)
     return out
@@ -106,9 +120,12 @@ def acceptance_times(submissions: Any) -> Dict[str, _dt.datetime]:
 
 def filing_available_at(filed: Any, acceptance: Optional[Any] = None) -> Any:
     """``(available_at, confidence)`` for one filing: the acceptance time when known
-    (``exact``), else the end of the ``filed`` day in New York (``bound``)."""
-    if acceptance is not None:
-        return _parse_acceptance(acceptance) if isinstance(acceptance, str) else to_utc(acceptance), "exact"
+    (``exact``), else the end of the ``filed`` day in New York (``bound``). An acceptance
+    value that is empty, numeric or naive is treated as unknown."""
+    if _usable_acceptance(acceptance):
+        return _parse_acceptance(acceptance), "exact"
+    if filed is None or (isinstance(filed, str) and not filed.strip()):
+        raise ValueError(f"no usable acceptanceDateTime ({acceptance!r}) and no filingDate")
     day = filed if isinstance(filed, _dt.date) else _dt.date.fromisoformat(str(filed)[:10])
     if isinstance(day, _dt.datetime):
         day = day.date()
@@ -134,7 +151,11 @@ def filings(submissions: Any, forms: Optional[Iterable[str]] = None) -> Any:
         for i in range(len(accn)):
             if keep is not None and form[i] not in keep:
                 continue
-            when, conf = filing_available_at(filed[i], acc[i]) if (acc[i] or filed[i]) else (None, None)
+            when, conf = (
+                filing_available_at(filed[i], acc[i])
+                if (_usable_acceptance(acc[i]) or filed[i])
+                else (None, None)
+            )
             if when is None:
                 raise ValueError(f"filing {accn[i]} has neither acceptanceDateTime nor filingDate")
             rows.append(

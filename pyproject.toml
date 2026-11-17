@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fin-pit"
-version = "0.1.0"
+version = "0.1.1"
 description = "Point-in-time guards for backtests and trading agents: available_at on every value, asof() firewalls, LangChain tool guards, strict-warmup indicators and named-variant indicator conformance vectors."
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Matt Busel" }]
 requires-python = ">=3.9"
 dependencies = [
-    "fin-primitives>=3.7",
+    "fin-primitives>=3.7,<4",
     "tzdata; platform_system == 'Windows'",
 ]
 keywords = [

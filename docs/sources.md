@@ -68,19 +68,29 @@ document, its `filings.recent` block, or the extra `CIK##########-submissions-##
 
 | Data | `available_at` | Confidence |
 |---|---|---|
-| daily bar for session D | D's close (16:00 `America/New_York` by default) + `lag` (15 minutes by default) | rule |
+| daily bar for session D | D's close (16:00 `America/New_York` by default) + `lag` (15 minutes by default); D is the bar label's date in the index's own zone | rule |
+| daily bar outside New York | needs `calendar=` (`"XSHG"`, `"XSHE"`, `"XHKG"`, `"XTKS"`, `"XLON"`, ...) or `close_time=`; without one `stamp_bars` raises instead of assuming a New York close | rule |
 | with `calendar="XNYS"` (needs `exchange_calendars`) | the session's real close, so 13:00 early closes are right | rule |
 | weekly / monthly bar | close of the last day it covers; an unfinished bar is in the future | rule |
 | intraday bar at t, interval i | t + i + `lag` | rule |
-| `session="24/7"` daily bar (crypto) | next 00:00 UTC + `lag` | rule |
+| `session="24/7"` daily bar (crypto) | next 00:00 UTC + `lag`; a UTC daily index without `session="24/7"`, `tz=` or `calendar=` raises | rule |
 | `Ticker.info`, `fast_info`, other snapshots | retrieval time (`snapshot()`) | live |
 
 The 15-minute lag is a conservative allowance for the closing print and vendor delay, not a
 measured figure; set `lag=` to your own.
 
+`Ticker.history` labels each daily session 00:00 in the exchange's zone, so the session day is
+read in that zone; converting the index to New York first would move a Shanghai or Tokyo session
+onto the previous day. A naive index (`yf.download` drops the zone for daily bars) is read in
+`tz=`, New York by default: a New York close is later than every Asian and European close on the
+same date, so that default can only stamp those bars late, never early. It is wrong for crypto,
+whose UTC day closes at 20:00 New York in summer: pass `session="24/7"`.
+
 ```python
 bars = yfinance.stamp_bars(yf.download("NVDA", period="5y", multi_level_index=False))
 bars = yfinance.history("NVDA", period="5y", calendar="XNYS")   # fetch + stamp + cut to asof
+bars = yfinance.history("600519.SS", period="5y", calendar="XSHG")  # Shanghai: real closes
+bars = yfinance.history("BTC-USD", period="5y", session="24/7")     # crypto: UTC days
 info = yfinance.snapshot("NVDA")                                 # refused by any earlier asof
 ```
 

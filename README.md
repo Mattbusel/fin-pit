@@ -41,9 +41,12 @@ with pit.asof(trade_time):
 ```
 
 A guarded tool refuses date arguments (`curr_date`, `end_date`, ...) later than the decision
-time before the vendor is called, then filters or checks what comes back. With
-`scan_text=True`, string output that mentions a later date (a report "retrieved on" today)
-raises.
+time before the vendor is called (ISO dates, `YYYYMMDD`, `YYYY/MM/DD`, epoch seconds or
+milliseconds, "today"; naive times are read in the `asof` zone), then filters or checks what
+comes back, including records nested in dicts, lists, generators and a `ToolMessage` artifact.
+With `scan_text=True`, string output that mentions a later date (a report "retrieved on" today)
+raises. A guarded call that runs with no decision time (typically on a worker thread) warns;
+`pit.bind(fn)` carries the decision time into a thread pool.
 
 ## Strict-warmup indicators
 
@@ -54,8 +57,12 @@ df.pit.indicator("sma", 200)
 ```
 
 Computed by [fin-primitives](https://github.com/Mattbusel/fin-primitives) (pandas-ta's formulas
-in Rust, about 70 indicators); fin-pit masks every row that has fewer bars behind it than the
-indicator needs. A gap in the inputs resets the count. Inside `asof` the frame is cut first.
+in Rust, 64 indicators in fin-primitives 3.7.0); fin-pit masks every row that has fewer bars
+behind it than the indicator needs. A gap in the inputs resets the count. Only causal outputs come
+back: DPO is computed uncentred and Ichimoku's chikou span (the close 26 bars ahead) is dropped,
+and every indicator is checked at run time by cutting a probe series short. Inside `asof` a frame
+with `available_at` is cut to the decision time first; a plain OHLCV frame loses the bars labelled
+at or after it and raises a warning, since its last bar may still be open.
 
 ## Sources
 
@@ -64,7 +71,7 @@ indicator needs. A gap in the inputs resets the count. Inside `asof` the frame i
 | FRED / ALFRED (`adapters.fred`) | end of the vintage's `realtime_start` day in New York, or a release time you give | rule |
 | SEC EDGAR (`adapters.edgar`) | the filing's `acceptanceDateTime` (UTC) | exact |
 | SEC EDGAR, accession not in your submissions data | end of the `filed` day in New York | bound |
-| yfinance bars (`adapters.yfinance`) | session close + lag (15 min default), real closes with `exchange_calendars` | rule |
+| yfinance bars (`adapters.yfinance`) | session close + lag (15 min default); 16:00 New York unless you pass `calendar=` (`"XSHG"`, `"XTKS"`, ...) or `close_time=`, which non-US bars require | rule |
 | yfinance `Ticker.info` snapshots | retrieval time | live |
 
 ## Conformance vectors
@@ -82,7 +89,8 @@ def test_rsi(pit_case):
     pit_case.check(my_rsi(pit_case.inputs["close"], 14))
 ```
 
-The canonical vectors match TA-Lib 0.8.3 on all 43 indicators; pandas-ta-classic 0.9.0,
+The canonical vectors match TA-Lib 0.8.3 on all 41 indicators TA-Lib implements (it has no HMA or
+VWMA; those two are checked against pandas-ta-classic and fin-primitives); pandas-ta-classic 0.9.0,
 fin-primitives 3.7.0 and stockstats 0.6.14 results per indicator are in
 [docs/conformance-results.md](https://github.com/Mattbusel/fin-pit/blob/main/docs/conformance-results.md).
 

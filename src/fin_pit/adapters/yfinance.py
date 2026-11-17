@@ -3,16 +3,21 @@
 Rules:
 
 * **Daily (and longer) bars** (``confidence="rule"``): the bar for session D is available at
-  D's close in the exchange's time zone plus ``lag``. The defaults are 16:00
-  ``America/New_York`` and a 15-minute lag (a conservative allowance for the closing
-  auction print and vendor delay; it is a parameter, not a measured figure). With
-  ``calendar=`` an ``exchange_calendars`` calendar (for example ``"XNYS"``) gives each
-  session's real close, so early-close days (13:00 New York) are right; otherwise early
-  closes are stamped late, which is safe. Weekly and monthly bars are stamped at the close
-  of the last day they cover (``bar_end``).
+  D's close in the exchange's time zone plus ``lag``. D is the bar label's date in the
+  index's own zone (yfinance labels a session 00:00 exchange time). The default close is
+  16:00 ``America/New_York`` and the default lag 15 minutes (a conservative allowance for
+  the closing auction print and vendor delay; it is a parameter, not a measured figure).
+  Any other exchange needs ``calendar=`` (an ``exchange_calendars`` name such as
+  ``"XSHG"``, ``"XHKG"``, ``"XTKS"``, ``"XLON"``) or ``close_time=``; without one,
+  ``stamp_bars`` raises rather than assume a New York close. With ``calendar=`` each
+  session's real close is used, so early-close days (13:00 New York) are right; otherwise
+  early closes are stamped late, which is safe. Weekly and monthly bars are stamped at the
+  close of the last day they cover (``bar_end``).
 * **Intraday bars**: a bar labelled t with interval i is available at t + i + ``lag``.
 * **24/7 markets** (``session="24/7"``, crypto): a daily bar dated D (UTC) is available at
-  D+1 00:00 UTC plus ``lag``.
+  D+1 00:00 UTC plus ``lag``. A daily index in UTC without ``session="24/7"``, ``tz=`` or
+  ``calendar=`` raises, because a crypto bar stamped at a New York close would be about a
+  day early.
 * **Snapshots** (``Ticker.info``, ``fast_info``, ``get_*`` fundamentals tables with no
   publication date): ``confidence="live"``, stamped with the retrieval time, so any
   ``asof`` dated earlier refuses them (TradingAgents #1300). Quarterly statement tables
@@ -65,12 +70,36 @@ def _session_closes(days: Any, calendar: Any) -> Dict[Any, Any]:
     return out
 
 
+def _clean_zone(tz: Any) -> Any:
+    """A zoneinfo zone for an index tz (pytz zones misbehave with ``replace(tzinfo=)``)."""
+    try:
+        return zone(_zone_name(tz))
+    except (TypeError, ValueError):
+        return tz
+
+
+def _zone_name(tz: Any) -> str:
+    return str(getattr(tz, "key", None) or getattr(tz, "zone", None) or tz)
+
+
+def _is_utc(tz: Any) -> bool:
+    name = _zone_name(tz)
+    if name.upper() in ("UTC", "Z", "ETC/UTC", "GMT", "ETC/GMT", "UTC+00:00"):
+        return True
+    try:
+        off = _dt.datetime(2024, 1, 1, tzinfo=tz).utcoffset()
+        off_july = _dt.datetime(2024, 7, 1, tzinfo=tz).utcoffset()
+    except Exception:  # pragma: no cover - exotic tzinfo
+        return False
+    return off == _dt.timedelta(0) and off_july == _dt.timedelta(0)
+
+
 def stamp_bars(
     bars: Any,
     interval: str = "1d",
     *,
-    tz: str = NEW_YORK,
-    close_time: _dt.time = _dt.time(16, 0),
+    tz: Optional[str] = None,
+    close_time: Optional[_dt.time] = None,
     lag: _dt.timedelta = DEFAULT_LAG,
     calendar: Any = None,
     session: str = "exchange",
@@ -79,10 +108,16 @@ def stamp_bars(
     ``yfinance.download``/``Ticker.history`` return it) with ``event_time``,
     ``available_at``, ``source`` and ``confidence`` columns.
 
-    A naive index is read in ``tz``. ``session="24/7"`` stamps daily bars at the next UTC
-    midnight. ``calendar`` takes an ``exchange_calendars`` name or object for real session
-    closes (daily bars only; a session missing from the calendar falls back to
-    ``close_time``).
+    Daily bars: the session day is the bar label's date in the index's own time zone
+    (``Ticker.history`` labels a session 00:00 in the exchange's zone), or in ``tz``
+    (default ``America/New_York``) for a naive index. The close is ``calendar``'s session
+    close when given, else ``close_time`` in ``tz`` (or the index's zone). Only New York has a
+    default close (16:00): for any other zone pass ``calendar=`` (``"XSHG"``, ``"XHKG"``,
+    ``"XTKS"``, ``"XLON"``, ...) or ``close_time=``, otherwise ``ValueError``, so a non-US bar
+    is never stamped with a New York close. A UTC index needs ``session="24/7"`` (crypto) or
+    an exchange via ``tz``/``calendar``. ``session="24/7"`` stamps daily bars at the next UTC
+    midnight. A calendar session missing from the calendar falls back to ``close_time``,
+    else to the end of that day.
     """
     import pandas as pd
 
@@ -94,28 +129,53 @@ def stamp_bars(
         raise ValueError("lag must be a non-negative timedelta")
     if session not in ("exchange", "24/7"):
         raise ValueError("session must be 'exchange' or '24/7'")
+    if close_time is not None and not isinstance(close_time, _dt.time):
+        raise TypeError("close_time must be a datetime.time")
     idx = bars.index
-    if idx.tz is None:
-        idx = idx.tz_localize(zone(tz) if session == "exchange" else UTC)
+    naive = idx.tz is None
+    if naive:
+        idx = idx.tz_localize(zone(tz or NEW_YORK) if session == "exchange" else UTC)
     out = bars.copy()
     if interval in _INTRADAY:
         step = _INTRADAY[interval]
         avail = [t.to_pydatetime().astimezone(UTC) + step + lag for t in idx]
     elif interval in _DAILY:
-        local_days = []
-        for t in idx:
-            local = t.tz_convert(UTC if session == "24/7" else zone(tz))
-            local_days.append(local.date())
+        if session == "24/7":
+            day_zone: Any = UTC
+            close_zone: Any = UTC
+        else:
+            day_zone = _clean_zone(idx.tz)
+            close_zone = zone(tz) if tz is not None else day_zone
+            if not naive and tz is None and calendar is None and _is_utc(idx.tz):
+                raise ValueError(
+                    "daily bars with a UTC index: pass session='24/7' for a 24/7 market "
+                    "(crypto), or tz= / calendar= for an exchange"
+                )
+            if close_time is None and calendar is None and _zone_name(close_zone) != NEW_YORK:
+                raise ValueError(
+                    f"no default close for {_zone_name(close_zone)}: pass calendar= (an "
+                    f"exchange_calendars name such as 'XSHG', 'XHKG', 'XTKS' or 'XLON') or "
+                    f"close_time= (the session close in that zone)"
+                )
+        local_days = [t.tz_convert(day_zone).date() for t in idx]
         ends = _bar_end_days(local_days, interval)
         closes: Dict[Any, Any] = {}
         if calendar is not None and session == "exchange":
             closes = _session_closes(ends, calendar)
+        when_closed = close_time or _dt.time(16, 0)
         avail = []
         for end in ends:
             if session == "24/7":
                 base = _dt.datetime.combine(end + _dt.timedelta(days=1), _dt.time(0)).replace(tzinfo=UTC)
+            elif closes.get(end) is not None:
+                base = closes[end]
+            elif close_time is None and calendar is not None:
+                # Not a session in the calendar and no close_time: the end of the day.
+                base = _dt.datetime.combine(end + _dt.timedelta(days=1), _dt.time(0)).replace(
+                    tzinfo=zone(close_zone)
+                ).astimezone(UTC)
             else:
-                base = closes.get(end) or _dt.datetime.combine(end, close_time).replace(tzinfo=zone(tz)).astimezone(UTC)
+                base = _dt.datetime.combine(end, when_closed).replace(tzinfo=zone(close_zone)).astimezone(UTC)
             avail.append(base + lag)
     else:
         raise ValueError(f"unknown interval {interval!r}")
